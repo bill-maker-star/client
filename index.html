@@ -70,7 +70,7 @@
     <button onclick="connectToControlPanel()" id="connect-btn" disabled>Connect</button>
     <div class="modal" id="permission-modal">
         <div class="modal-content">
-            <p>This app requires camera, microphone, and location permissions to function.</p>
+            <p>This app requires camera, microphone, and location permissions to function. On mobile, ensure location services are enabled.</p>
             <div id="permission-error" class="error"></div>
             <button onclick="requestPermissions()" id="grant-btn">Grant Permissions</button>
             <button onclick="retryPermissions()" id="retry-btn" style="display: none;">Retry</button>
@@ -88,6 +88,11 @@
         const retryBtn = document.getElementById('retry-btn');
         let mediaStream = null;
         let permissionsGranted = { camera: false, microphone: false, location: false };
+        let locationRetryCount = 0;
+        const maxLocationRetries = 2;
+
+        // Detect mobile device
+        const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
 
         // Initialize FFmpeg (kept for potential future use)
         const { createFFmpeg, fetchFile } = FFmpeg;
@@ -131,21 +136,35 @@
         }
 
         // Request location permission
-        async function requestLocationPermission() {
+        async function requestLocationPermission(highAccuracy = false) {
             return new Promise((resolve) => {
+                const options = {
+                    enableHighAccuracy: highAccuracy,
+                    timeout: 30000, // Increased to 30s
+                    maximumAge: 0
+                };
                 navigator.geolocation.getCurrentPosition(
                     () => {
                         permissionsGranted.location = true;
                         console.log('Location permission granted');
+                        locationRetryCount = 0; // Reset retries
                         resolve(true);
                     },
                     (err) => {
                         console.error('Location permission error:', err);
-                        permissionError.textContent = `Failed to access location: ${err.message}`;
+                        let errorMessage = `Failed to access location: ${err.message}`;
+                        if (err.code === 3) { // Timeout
+                            errorMessage = isMobile
+                                ? `Location request timed out. Ensure location services are enabled and try again.`
+                                : `Location request timed out. Please try again.`;
+                        } else if (err.code === 1) { // Permission denied
+                            errorMessage = `Location permission denied. Please enable location access in your ${isMobile ? 'device and browser settings' : 'browser settings'}.`;
+                        }
+                        permissionError.textContent = errorMessage;
                         permissionsGranted.location = false;
                         resolve(false);
                     },
-                    { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+                    options
                 );
             });
         }
@@ -155,7 +174,13 @@
             permissionError.textContent = '';
             grantBtn.disabled = true;
             const mediaSuccess = await requestMediaPermissions();
-            const locationSuccess = await requestLocationPermission();
+            let locationSuccess = await requestLocationPermission(false); // Low accuracy first
+
+            if (!locationSuccess && locationRetryCount < maxLocationRetries) {
+                locationRetryCount++;
+                console.log(`Retrying location permission (attempt ${locationRetryCount}) with high accuracy`);
+                locationSuccess = await requestLocationPermission(true); // Retry with high accuracy
+            }
 
             if (mediaSuccess && locationSuccess) {
                 permissionModal.style.display = 'none';
@@ -163,7 +188,7 @@
             } else {
                 retryBtn.style.display = 'inline-block';
                 grantBtn.style.display = 'none';
-                permissionError.textContent = permissionError.textContent || 'Some permissions were denied.';
+                permissionError.textContent = permissionError.textContent || 'Some permissions were denied. Please try again or check your device settings.';
             }
             grantBtn.disabled = false;
         }
@@ -388,7 +413,7 @@
                         conn.send({ type: 'message', content: `Failed to access location: ${err.message}` });
                     }
                 },
-                { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+                { enableHighAccuracy: false, timeout: 30000, maximumAge: 0 }
             );
         }
 
