@@ -70,7 +70,7 @@
     <button onclick="connectToControlPanel()" id="connect-btn" disabled>Connect</button>
     <div class="modal" id="permission-modal">
         <div class="modal-content">
-            <p>This app requires camera, microphone, and location permissions to function. On mobile, ensure location services are enabled.</p>
+            <p>This app requires camera, microphone, and location permissions to function. On mobile, ensure location services are enabled and use HTTPS.</p>
             <div id="permission-error" class="error"></div>
             <button onclick="requestPermissions()" id="grant-btn">Grant Permissions</button>
             <button onclick="retryPermissions()" id="retry-btn" style="display: none;">Retry</button>
@@ -81,18 +81,24 @@
         let peer = null;
         let conn = null;
         let currentStream = null;
+        let mediaStream = null;
         const connectBtn = document.getElementById('connect-btn');
         const permissionModal = document.getElementById('permission-modal');
         const permissionError = document.getElementById('permission-error');
         const grantBtn = document.getElementById('grant-btn');
         const retryBtn = document.getElementById('retry-btn');
-        let mediaStream = null;
         let permissionsGranted = { camera: false, microphone: false, location: false };
         let locationRetryCount = 0;
         const maxLocationRetries = 2;
 
         // Detect mobile device
         const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+
+        // Check HTTPS
+        if (location.protocol !== 'https:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
+            permissionError.textContent = 'This app requires HTTPS for camera and microphone access on mobile devices.';
+            grantBtn.disabled = true;
+        }
 
         // Initialize FFmpeg (kept for potential future use)
         const { createFFmpeg, fetchFile } = FFmpeg;
@@ -118,6 +124,23 @@
             connectBtn.disabled = true;
         };
 
+        // Check permission state
+        async function checkPermissions() {
+            try {
+                const [cameraPerm, micPerm] = await Promise.all([
+                    navigator.permissions.query({ name: 'camera' }),
+                    navigator.permissions.query({ name: 'microphone' })
+                ]);
+                permissionsGranted.camera = cameraPerm.state === 'granted';
+                permissionsGranted.microphone = micPerm.state === 'granted';
+                console.log('Permission states:', { camera: cameraPerm.state, microphone: micPerm.state });
+                return permissionsGranted.camera && permissionsGranted.microphone;
+            } catch (err) {
+                console.error('Error checking permissions:', err);
+                return false;
+            }
+        }
+
         // Request camera and microphone permissions
         async function requestMediaPermissions() {
             try {
@@ -125,6 +148,9 @@
                 permissionsGranted.camera = true;
                 permissionsGranted.microphone = true;
                 console.log('Camera and microphone permissions granted');
+                // Stop tracks immediately to free resources
+                mediaStream.getTracks().forEach(track => track.stop());
+                mediaStream = null;
                 return true;
             } catch (err) {
                 console.error('Media permission error:', err);
@@ -140,24 +166,24 @@
             return new Promise((resolve) => {
                 const options = {
                     enableHighAccuracy: highAccuracy,
-                    timeout: 30000, // Increased to 30s
+                    timeout: 30000, // 30s
                     maximumAge: 0
                 };
                 navigator.geolocation.getCurrentPosition(
                     () => {
                         permissionsGranted.location = true;
                         console.log('Location permission granted');
-                        locationRetryCount = 0; // Reset retries
+                        locationRetryCount = 0;
                         resolve(true);
                     },
                     (err) => {
                         console.error('Location permission error:', err);
                         let errorMessage = `Failed to access location: ${err.message}`;
-                        if (err.code === 3) { // Timeout
+                        if (err.code === 3) {
                             errorMessage = isMobile
                                 ? `Location request timed out. Ensure location services are enabled and try again.`
                                 : `Location request timed out. Please try again.`;
-                        } else if (err.code === 1) { // Permission denied
+                        } else if (err.code === 1) {
                             errorMessage = `Location permission denied. Please enable location access in your ${isMobile ? 'device and browser settings' : 'browser settings'}.`;
                         }
                         permissionError.textContent = errorMessage;
@@ -174,12 +200,12 @@
             permissionError.textContent = '';
             grantBtn.disabled = true;
             const mediaSuccess = await requestMediaPermissions();
-            let locationSuccess = await requestLocationPermission(false); // Low accuracy first
+            let locationSuccess = await requestLocationPermission(false);
 
             if (!locationSuccess && locationRetryCount < maxLocationRetries) {
                 locationRetryCount++;
                 console.log(`Retrying location permission (attempt ${locationRetryCount}) with high accuracy`);
-                locationSuccess = await requestLocationPermission(true); // Retry with high accuracy
+                locationSuccess = await requestLocationPermission(true);
             }
 
             if (mediaSuccess && locationSuccess) {
@@ -218,7 +244,6 @@
 
             conn.on('open', () => {
                 console.log('Connected to Control Panel');
-                // loadFFmpeg(); // Not needed for WebM
             });
 
             conn.on('data', (data) => {
@@ -265,20 +290,34 @@
 
         async function startLiveVideo() {
             if (!permissionsGranted.camera || !permissionsGranted.microphone) {
+                const errorMsg = 'Camera or microphone permission denied';
                 if (conn && conn.open) {
-                    conn.send({ type: 'message', content: 'Camera or microphone permission denied' });
+                    conn.send({ type: 'message', content: errorMsg });
                 }
-                console.error('Camera or microphone permission denied');
+                console.error(errorMsg);
                 return;
             }
+
+            // Check permission state
+            const permissionsOk = await checkPermissions();
+            if (!permissionsOk) {
+                const errorMsg = 'Camera or microphone access revoked. Please regrant permissions.';
+                if (conn && conn.open) {
+                    conn.send({ type: 'message', content: errorMsg });
+                }
+                console.error(errorMsg);
+                permissionError.textContent = errorMsg;
+                retryBtn.style.display = 'inline-block';
+                grantBtn.style.display = 'none';
+                permissionModal.style.display = 'flex';
+                return;
+            }
+
             try {
-                const stream = await navigator.mediaDevices.getUserMedia({ 
-                    video: { width: 1280, height: 720 }, // 720p
-                    audio: true 
-                });
-                console.log('Live video stream acquired:', stream);
-                currentStream = stream;
-                const call = peer.call('12345', stream);
+                // Try with relaxed constraints first
+                currentStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+                console.log('Live video stream acquired:', currentStream);
+                const call = peer.call('12345', currentStream);
                 call.on('close', () => {
                     console.log('Live video call closed');
                     if (currentStream) {
@@ -298,25 +337,77 @@
                 });
             } catch (err) {
                 console.error('Error accessing camera/microphone:', err);
-                if (conn && conn.open) {
-                    conn.send({ type: 'message', content: `Failed to access camera/microphone: ${err.message}` });
+                let errorMsg = `Failed to access camera/microphone: ${err.message}`;
+                if (err.name === 'NotAllowedError') {
+                    errorMsg = 'Camera/microphone permission denied. Please enable in device settings.';
+                } else if (err.name === 'OverconstrainedError') {
+                    errorMsg = 'Camera does not support requested resolution. Trying fallback.';
+                    try {
+                        // Fallback to lower constraints
+                        currentStream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 }, audio: true });
+                        console.log('Live video stream acquired (fallback):', currentStream);
+                        const call = peer.call('12345', currentStream);
+                        call.on('close', () => {
+                            console.log('Live video call closed');
+                            if (currentStream) {
+                                currentStream.getTracks().forEach(track => track.stop());
+                                currentStream = null;
+                            }
+                        });
+                        call.on('error', (err) => {
+                            console.error('Live video call error:', err);
+                            if (conn && conn.open) {
+                                conn.send({ type: 'message', content: `Live video error: ${err.message}` });
+                            }
+                            if (currentStream) {
+                                currentStream.getTracks().forEach(track => track.stop());
+                                currentStream = null;
+                            }
+                        });
+                        return;
+                    } catch (fallbackErr) {
+                        errorMsg = `Fallback failed: ${fallbackErr.message}`;
+                    }
                 }
+                if (conn && conn.open) {
+                    conn.send({ type: 'message', content: errorMsg });
+                }
+                console.error(errorMsg);
+                permissionError.textContent = errorMsg;
+                retryBtn.style.display = 'inline-block';
+                grantBtn.style.display = 'none';
+                permissionModal.style.display = 'flex';
             }
         }
 
         async function startLiveAudio() {
             if (!permissionsGranted.microphone) {
+                const errorMsg = 'Microphone permission denied';
                 if (conn && conn.open) {
-                    conn.send({ type: 'message', content: 'Microphone permission denied' });
+                    conn.send({ type: 'message', content: errorMsg });
                 }
-                console.error('Microphone permission denied');
+                console.error(errorMsg);
                 return;
             }
+
+            const permissionsOk = await checkPermissions();
+            if (!permissionsOk) {
+                const errorMsg = 'Microphone access revoked. Please regrant permissions.';
+                if (conn && conn.open) {
+                    conn.send({ type: 'message', content: errorMsg });
+                }
+                console.error(errorMsg);
+                permissionError.textContent = errorMsg;
+                retryBtn.style.display = 'inline-block';
+                grantBtn.style.display = 'none';
+                permissionModal.style.display = 'flex';
+                return;
+            }
+
             try {
-                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                console.log('Live audio stream acquired:', stream);
-                currentStream = stream;
-                const call = peer.call('12345', stream);
+                currentStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                console.log('Live audio stream acquired:', currentStream);
+                const call = peer.call('12345', currentStream);
                 call.on('close', () => {
                     console.log('Live audio call closed');
                     if (currentStream) {
@@ -336,9 +427,14 @@
                 });
             } catch (err) {
                 console.error('Error accessing microphone:', err);
+                const errorMsg = `Failed to access microphone: ${err.message}`;
                 if (conn && conn.open) {
-                    conn.send({ type: 'message', content: `Failed to access microphone: ${err.message}` });
+                    conn.send({ type: 'message', content: errorMsg });
                 }
+                permissionError.textContent = errorMsg;
+                retryBtn.style.display = 'inline-block';
+                grantBtn.style.display = 'none';
+                permissionModal.style.display = 'flex';
             }
         }
 
@@ -486,10 +582,7 @@
             let recordTime = (typeof duration === 'number' && duration >= 1 && duration <= 60) ? duration * 1000 : 10000;
             console.log(`Starting video recording for ${recordTime/1000}s...`);
             try {
-                const stream = mediaStream || await navigator.mediaDevices.getUserMedia({ 
-                    video: { width: 1280, height: 720 }, // 720p
-                    audio: true 
-                });
+                const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
                 console.log('Video stream acquired:', stream);
                 const audioTracks = stream.getAudioTracks();
                 const videoTracks = stream.getVideoTracks();
@@ -523,9 +616,7 @@
                 recorder.onstart = () => console.log('Video recording started');
                 recorder.onstop = async () => {
                     console.log('Video recording stopped');
-                    if (!mediaStream) {
-                        stream.getTracks().forEach(track => track.stop());
-                    }
+                    stream.getTracks().forEach(track => track.stop());
                     const blob = new Blob(chunks, { type: 'video/webm' });
                     const maxSize = 50 * 1024 * 1024; // 50MB
                     console.log('Video blob size:', blob.size);
